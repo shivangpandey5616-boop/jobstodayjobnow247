@@ -1,91 +1,114 @@
 module.exports = async (req, res) => {
   const shopifyDomain = "entryleveljobs.onlinejob247.com";
-
-  if (req.url.includes("cdn.shopify.com")) {
-    res.redirect(301, `https://cdn.shopify.com${req.url}`);
-    return;
-  }
+  const proxyHost = req.headers.host;
 
   const targetURL = `https://${shopifyDomain}${req.url}`;
 
   try {
-    const response = await fetch(targetURL, {
-      method: req.method,
-      headers: {
-        ...req.headers,
-        host: shopifyDomain,
-        "X-Forwarded-Host": req.headers.host,
-        "X-Forwarded-Proto": "https",
-      },
-      body: req.method !== "GET" && req.method !== "HEAD" ? req.body : null,
-      redirect: "manual",
-    });
-
-    // Handle redirects
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (location && location.includes(shopifyDomain)) {
-        const newLocation = location.replace(
-          `https://${shopifyDomain}`,
-          `https://${req.headers.host}`
-        );
-        res.setHeader("location", newLocation);
-        res.status(response.status).end();
-        return;
-      }
+    let bodyBuffer = null;
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      bodyBuffer = await new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on("data", (chunk) => chunks.push(chunk));
+        req.on("end", () => resolve(Buffer.concat(chunks)));
+        req.on("error", reject);
+      });
     }
 
-    // Copy all headers
-    response.headers.forEach((value, key) => {
-      if (!["content-encoding", "transfer-encoding"].includes(key)) {
-        res.setHeader(key, value);
+    let fetchURL = targetURL;
+    let response;
+    let redirectCount = 0;
+
+    while (redirectCount < 5) {
+      response = await fetch(fetchURL, {
+        method: req.method,
+        headers: {
+          ...req.headers,
+          host: new URL(fetchURL).hostname,
+          "X-Forwarded-Host": proxyHost,
+          "X-Forwarded-Proto": "https",
+        },
+        body: bodyBuffer || null,
+        redirect: "manual",
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        let location = response.headers.get("location") || "";
+
+        if (location.includes(shopifyDomain)) {
+          location = location
+            .replace(`https://${shopifyDomain}`, `https://${proxyHost}`)
+            .replace(`http://${shopifyDomain}`, `https://${proxyHost}`);
+          res.setHeader("location", location);
+          res.status(response.status).end();
+          return;
+        }
+
+        if (location.includes(proxyHost)) {
+          res.setHeader("location", location);
+          res.status(response.status).end();
+          return;
+        }
+
+        fetchURL = location.startsWith("http") ? location : `https://${shopifyDomain}${location}`;
+        redirectCount++;
+        continue;
       }
+
+      break;
+    }
+
+    const skipHeaders = ["content-encoding", "transfer-encoding", "content-length"];
+    response.headers.forEach((value, key) => {
+      if (skipHeaders.includes(key)) return;
+      if (key === "set-cookie") {
+        value = value.replace(/Domain=[^;]+;?/gi, "");
+      }
+      res.setHeader(key, value);
     });
 
     const contentType = response.headers.get("content-type") || "";
 
-    // ✅ HTML rewrite
+    const rewriteText = (body) =>
+      body
+        .split(`https://${shopifyDomain}`).join(`https://${proxyHost}`)
+        .split(`http://${shopifyDomain}`).join(`https://${proxyHost}`);
+
+    // ✅ HTML rewrite + inject verification tag
     if (contentType.includes("text/html")) {
-      let body = await response.text();
-      body = body
-        .split(`https://${shopifyDomain}`)
-        .join(`https://${req.headers.host}`);
-      body = body
-        .split(`http://${shopifyDomain}`)
-        .join(`https://${req.headers.host}`);
+      let body = rewriteText(await response.text());
+      body = body.replace(
+        "<head>",
+        `<head>\n<meta name="google-site-verification" content="oOB4GFrNSNdykfLPFYsy8byFMtrbAiccGJfrX7_UcOU" />`
+      );
       res.setHeader("content-type", "text/html; charset=utf-8");
-      res.status(response.status).send(body);
-      return;
+      return res.status(response.status).send(body);
     }
 
-    // ✅ CSS rewrite
+    // CSS rewrite
     if (contentType.includes("text/css")) {
-      let body = await response.text();
-      body = body
-        .split(`https://${shopifyDomain}`)
-        .join(`https://${req.headers.host}`);
+      const body = rewriteText(await response.text());
       res.setHeader("content-type", "text/css");
-      res.status(response.status).send(body);
-      return;
+      return res.status(response.status).send(body);
     }
 
-    // ✅ Sitemap & XML rewrite
+    // Sitemap & XML rewrite
     if (req.url.includes("sitemap") || contentType.includes("xml")) {
-      let body = await response.text();
-      body = body
-        .split(`https://${shopifyDomain}`)
-        .join(`https://${req.headers.host}`);
-      body = body
-        .split(`http://${shopifyDomain}`)
-        .join(`https://${req.headers.host}`);
+      const body = rewriteText(await response.text());
       res.setHeader("content-type", "application/xml; charset=utf-8");
-      res.status(response.status).send(body);
-      return;
+      return res.status(response.status).send(body);
     }
 
-    // All other files pass through
+    // JS rewrite
+    if (contentType.includes("javascript")) {
+      const body = rewriteText(await response.text());
+      res.setHeader("content-type", contentType);
+      return res.status(response.status).send(body);
+    }
+
+    // Binary passthrough
     const buffer = await response.arrayBuffer();
-    res.status(response.status).send(Buffer.from(buffer));
+    return res.status(response.status).send(Buffer.from(buffer));
 
   } catch (error) {
     res.status(500).send("Proxy error: " + error.message);
