@@ -81,7 +81,7 @@ module.exports = async (req, res) => {
       // Inject Google Search Console verification
       body = body.replace(
         "<head>",
-        `<head>\n<meta name="google-site-verification" content="oOB4GFrNSNdykfLPFYsy8byFMtrbAiccGJfrX7_UcOU" />`
+        `<head>\n<meta name="google-site-verification" content="BZ0xSFTM-yYVgYRfCvQF25PjQp5JWdIK61TO-9ex1Sg" />`
       );
 
       // Update JobPosting schema dates
