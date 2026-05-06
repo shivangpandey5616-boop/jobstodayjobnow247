@@ -1,5 +1,5 @@
 module.exports = async (req, res) => {
-  const shopifyDomain = "jobstoday.jobsnow247.com"; // ✅ updated
+  const shopifyDomain = "jobstoday.jobsnow247.com";
   const proxyHost = req.headers.host;
 
   const targetURL = `https://${shopifyDomain}${req.url}`;
@@ -27,19 +27,38 @@ module.exports = async (req, res) => {
       redirect: "manual",
     });
 
+    // Handle redirects
     if (response.status >= 300 && response.status < 400) {
       let location = response.headers.get("location") || "";
-      location = location
-        .replace(`https://${shopifyDomain}`, `https://${proxyHost}`)
-        .replace(`http://${shopifyDomain}`, `https://${proxyHost}`);
+
+      // Rewrite if it points to shopify domain
+      if (location.includes(shopifyDomain)) {
+        location = location
+          .replace(`https://${shopifyDomain}`, `https://${proxyHost}`)
+          .replace(`http://${shopifyDomain}`, `https://${proxyHost}`);
+        res.setHeader("location", location);
+        res.status(response.status).end();
+        return;
+      }
+
+      // ✅ Block external redirects (e.g. entryleveljobs.onlinejob247.com)
+      if (location && !location.includes(proxyHost)) {
+        res.setHeader("location", `https://${proxyHost}/`);
+        res.status(302).end();
+        return;
+      }
+
+      // Internal proxy redirect
       res.setHeader("location", location);
       res.status(response.status).end();
       return;
     }
 
+    // Copy headers, skip problematic ones
     const skipHeaders = ["content-encoding", "transfer-encoding", "content-length"];
     response.headers.forEach((value, key) => {
       if (skipHeaders.includes(key)) return;
+      // Rewrite Set-Cookie domain so cookies work on proxy domain
       if (key === "set-cookie") {
         value = value.replace(/Domain=[^;]+;?/gi, "");
       }
@@ -53,30 +72,35 @@ module.exports = async (req, res) => {
         .split(`https://${shopifyDomain}`).join(`https://${proxyHost}`)
         .split(`http://${shopifyDomain}`).join(`https://${proxyHost}`);
 
+    // HTML rewrite
     if (contentType.includes("text/html")) {
       const body = rewriteText(await response.text());
       res.setHeader("content-type", "text/html; charset=utf-8");
       return res.status(response.status).send(body);
     }
 
+    // CSS rewrite
     if (contentType.includes("text/css")) {
       const body = rewriteText(await response.text());
       res.setHeader("content-type", "text/css");
       return res.status(response.status).send(body);
     }
 
+    // Sitemap & XML rewrite
     if (req.url.includes("sitemap") || contentType.includes("xml")) {
       const body = rewriteText(await response.text());
       res.setHeader("content-type", "application/xml; charset=utf-8");
       return res.status(response.status).send(body);
     }
 
+    // JS rewrite
     if (contentType.includes("javascript")) {
       const body = rewriteText(await response.text());
       res.setHeader("content-type", contentType);
       return res.status(response.status).send(body);
     }
 
+    // Binary passthrough
     const buffer = await response.arrayBuffer();
     return res.status(response.status).send(Buffer.from(buffer));
 
