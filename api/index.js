@@ -1,108 +1,91 @@
 module.exports = async (req, res) => {
   const shopifyDomain = "jobstoday.jobsnow247.com";
-  const proxyHost = req.headers.host;
+
+  if (req.url.includes("cdn.shopify.com")) {
+    res.redirect(301, `https://cdn.shopify.com${req.url}`);
+    return;
+  }
 
   const targetURL = `https://${shopifyDomain}${req.url}`;
 
   try {
-    let bodyBuffer = null;
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      bodyBuffer = await new Promise((resolve, reject) => {
-        const chunks = [];
-        req.on("data", (chunk) => chunks.push(chunk));
-        req.on("end", () => resolve(Buffer.concat(chunks)));
-        req.on("error", reject);
-      });
-    }
-
     const response = await fetch(targetURL, {
       method: req.method,
       headers: {
         ...req.headers,
         host: shopifyDomain,
-        "X-Forwarded-Host": proxyHost,
+        "X-Forwarded-Host": req.headers.host,
         "X-Forwarded-Proto": "https",
       },
-      body: bodyBuffer || null,
+      body: req.method !== "GET" && req.method !== "HEAD" ? req.body : null,
       redirect: "manual",
     });
 
     // Handle redirects
     if (response.status >= 300 && response.status < 400) {
-      let location = response.headers.get("location") || "";
-
-      // Rewrite if it points to shopify domain
-      if (location.includes(shopifyDomain)) {
-        location = location
-          .replace(`https://${shopifyDomain}`, `https://${proxyHost}`)
-          .replace(`http://${shopifyDomain}`, `https://${proxyHost}`);
-        res.setHeader("location", location);
+      const location = response.headers.get("location");
+      if (location && location.includes(shopifyDomain)) {
+        const newLocation = location.replace(
+          `https://${shopifyDomain}`,
+          `https://${req.headers.host}`
+        );
+        res.setHeader("location", newLocation);
         res.status(response.status).end();
         return;
       }
-
-      // ✅ Block external redirects (e.g. entryleveljobs.onlinejob247.com)
-      if (location && !location.includes(proxyHost)) {
-        res.setHeader("location", `https://${proxyHost}/`);
-        res.status(302).end();
-        return;
-      }
-
-      // Internal proxy redirect
-      res.setHeader("location", location);
-      res.status(response.status).end();
-      return;
     }
 
-    // Copy headers, skip problematic ones
-    const skipHeaders = ["content-encoding", "transfer-encoding", "content-length"];
+    // Copy all headers
     response.headers.forEach((value, key) => {
-      if (skipHeaders.includes(key)) return;
-      // Rewrite Set-Cookie domain so cookies work on proxy domain
-      if (key === "set-cookie") {
-        value = value.replace(/Domain=[^;]+;?/gi, "");
+      if (!["content-encoding", "transfer-encoding"].includes(key)) {
+        res.setHeader(key, value);
       }
-      res.setHeader(key, value);
     });
 
     const contentType = response.headers.get("content-type") || "";
 
-    const rewriteText = (body) =>
-      body
-        .split(`https://${shopifyDomain}`).join(`https://${proxyHost}`)
-        .split(`http://${shopifyDomain}`).join(`https://${proxyHost}`);
-
-    // HTML rewrite
+    // ✅ HTML rewrite
     if (contentType.includes("text/html")) {
-      const body = rewriteText(await response.text());
+      let body = await response.text();
+      body = body
+        .split(`https://${shopifyDomain}`)
+        .join(`https://${req.headers.host}`);
+      body = body
+        .split(`http://${shopifyDomain}`)
+        .join(`https://${req.headers.host}`);
       res.setHeader("content-type", "text/html; charset=utf-8");
-      return res.status(response.status).send(body);
+      res.status(response.status).send(body);
+      return;
     }
 
-    // CSS rewrite
+    // ✅ CSS rewrite
     if (contentType.includes("text/css")) {
-      const body = rewriteText(await response.text());
+      let body = await response.text();
+      body = body
+        .split(`https://${shopifyDomain}`)
+        .join(`https://${req.headers.host}`);
       res.setHeader("content-type", "text/css");
-      return res.status(response.status).send(body);
+      res.status(response.status).send(body);
+      return;
     }
 
-    // Sitemap & XML rewrite
+    // ✅ Sitemap & XML rewrite
     if (req.url.includes("sitemap") || contentType.includes("xml")) {
-      const body = rewriteText(await response.text());
+      let body = await response.text();
+      body = body
+        .split(`https://${shopifyDomain}`)
+        .join(`https://${req.headers.host}`);
+      body = body
+        .split(`http://${shopifyDomain}`)
+        .join(`https://${req.headers.host}`);
       res.setHeader("content-type", "application/xml; charset=utf-8");
-      return res.status(response.status).send(body);
+      res.status(response.status).send(body);
+      return;
     }
 
-    // JS rewrite
-    if (contentType.includes("javascript")) {
-      const body = rewriteText(await response.text());
-      res.setHeader("content-type", contentType);
-      return res.status(response.status).send(body);
-    }
-
-    // Binary passthrough
+    // All other files pass through
     const buffer = await response.arrayBuffer();
-    return res.status(response.status).send(Buffer.from(buffer));
+    res.status(response.status).send(Buffer.from(buffer));
 
   } catch (error) {
     res.status(500).send("Proxy error: " + error.message);
