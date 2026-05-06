@@ -1,5 +1,5 @@
 module.exports = async (req, res) => {
-  const shopifyDomain = "jobstoday.jobsnow247.com";
+  const shopifyDomain = "entryleveljobs.onlinejob247.com";
 
   if (req.url.includes("cdn.shopify.com")) {
     res.redirect(301, `https://cdn.shopify.com${req.url}`);
